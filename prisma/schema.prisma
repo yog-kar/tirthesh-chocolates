@@ -1,0 +1,101 @@
+
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum BusinessType {
+  TIRTHESH_CHOCOLATES
+  JAYANAND_FOODS
+}
+
+model Product {
+  id          String       @id @default(cuid())
+  business    BusinessType
+  name        String
+  slug        String       @unique
+  description String       @default("")
+  price       Decimal      @db.Decimal(10, 2)
+  stock       Int          @default(0)
+  imageUrl    String       @default("")
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+
+enum OrderStatus {
+  PENDING
+  CONFIRMED
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  UPI
+  COD
+}
+
+enum PaymentStatus {
+  PENDING
+  AWAITING_VERIFICATION
+  PAID
+  REJECTED
+  FAILED
+  REFUNDED
+}
+
+model Order {
+  id              String        @id @default(cuid())
+  orderNumber     String        @unique @default(cuid())
+  customerName    String
+  email           String?
+  phone           String
+  addressLine1    String
+  addressLine2    String?
+  city            String
+  state           String
+  postalCode      String
+  country         String        @default("India")
+  subtotal        Decimal       @db.Decimal(10, 2)
+  shippingFee     Decimal       @default(0) @db.Decimal(10, 2)
+  total            Decimal       @db.Decimal(10, 2)
+  status                OrderStatus   @default(PENDING)
+  paymentMethod         PaymentMethod @default(UPI)
+  paymentStatus         PaymentStatus @default(PENDING)
+  paymentReference      String?
+  paymentScreenshotUrl  String?
+  paymentVerifiedAt     DateTime?
+  paymentVerifiedBy     String?
+  items             OrderItem[]
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([createdAt])
+  @@index([phone])
+  @@index([status])
+}
+
+model OrderItem {
+  id            String   @id @default(cuid())
+  orderId       String
+  productId     String
+  productName   String
+  productSlug   String
+  business      BusinessType
+  unitPrice     Decimal  @db.Decimal(10, 2)
+  quantity      Int
+  lineTotal     Decimal  @db.Decimal(10, 2)
+  imageUrl      String?
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
