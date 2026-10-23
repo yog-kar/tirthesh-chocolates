@@ -1,11 +1,8 @@
 
 import { NextResponse } from "next/server";
-import { auth, currentUser } from "@clerk/nextjs/server";
-import {
-  PaymentMethod,
-  PaymentStatus,
-} from "@/app/generated/prisma/client";
+import { PaymentStatus } from "@/app/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { isStoreOwner } from "@/lib/admin-auth";
 
 type RouteContext = {
   params: Promise<{ orderId: string }>;
@@ -13,55 +10,48 @@ type RouteContext = {
 
 export async function POST(
   request: Request,
-  { params }: RouteContext
+  { params }: RouteContext,
 ) {
   try {
-    // 1. Verify that the requester is signed in.
-    const { userId } = await auth();
+    // Only the authenticated store owner may update payment status.
+    const authorized = await isStoreOwner();
 
-    if (!userId) {
+    if (!authorized) {
       return NextResponse.json(
-        { error: "You must sign in first." },
-        { status: 401 }
+        { error: "Unauthorized. Store owner access is required." },
+        { status: 403 },
       );
     }
 
-    // 2. Verify that the requester is the authorized admin.
-    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-
-    if (!adminEmail) {
-      console.error("ADMIN_EMAIL is not configured.");
-
-      return NextResponse.json(
-        { error: "Admin authorization is not configured." },
-        { status: 500 }
-      );
-    }
-
-    const user = await currentUser();
-
-    const userEmail = user?.primaryEmailAddress?.emailAddress
-      ?.trim()
-      .toLowerCase();
-
-    if (!userEmail || userEmail !== adminEmail) {
-      return NextResponse.json(
-        { error: "You are not authorized to verify payments." },
-        { status: 403 }
-      );
-    }
-
-    // 3. Read and validate the requested action.
     const { orderId } = await params;
 
-    let body: { action?: unknown };
+    if (!orderId?.trim()) {
+      return NextResponse.json(
+        { error: "A valid order ID is required." },
+        { status: 400 },
+      );
+    }
+
+    let body: unknown;
 
     try {
       body = await request.json();
     } catch {
       return NextResponse.json(
+        { error: "The request body must contain valid JSON." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      typeof body !== "object" ||
+      body === null ||
+      !("action" in body) ||
+      typeof body.action !== "string"
+    ) {
+      return NextResponse.json(
         { error: "Invalid request body." },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
@@ -69,80 +59,92 @@ export async function POST(
 
     if (action !== "mark_paid" && action !== "reject") {
       return NextResponse.json(
-        { error: "Invalid payment action." },
-        { status: 400 }
+        { error: "Action must be mark_paid or reject." },
+        { status: 400 },
       );
     }
 
-    // 4. Find the order.
     const order = await prisma.order.findUnique({
-      where: { id: orderId },
-    });
-
-    if (!order) {
-      return NextResponse.json(
-        { error: "Order not found." },
-        { status: 404 }
-      );
-    }
-
-    // 5. Only allow verification of UPI orders awaiting verification.
-    if (
-      order.paymentMethod !== PaymentMethod.UPI ||
-      order.paymentStatus !== PaymentStatus.AWAITING_VERIFICATION
-    ) {
-      return NextResponse.json(
-        {
-          error:
-            "This order is not a UPI payment awaiting verification.",
-        },
-        { status: 409 }
-      );
-    }
-
-    // 6. Update only if the order still awaits verification.
-    const newStatus =
-      action === "mark_paid"
-        ? PaymentStatus.PAID
-        : PaymentStatus.REJECTED;
-
-    const result = await prisma.order.updateMany({
-      where: {
-        id: orderId,
-        paymentMethod: PaymentMethod.UPI,
-        paymentStatus: PaymentStatus.AWAITING_VERIFICATION,
-      },
-      data: {
-        paymentStatus: newStatus,
-        paymentVerifiedAt: new Date(),
-        paymentVerifiedBy: userEmail,
-      },
-    });
-
-    if (result.count !== 1) {
-      return NextResponse.json(
-        {
-          error:
-            "The payment status has changed. Refresh the order and try again.",
-        },
-        { status: 409 }
-      );
-    }
-
-    // 7. Return the updated order.
-    const updatedOrder = await prisma.order.findUnique({
       where: { id: orderId },
       select: {
         id: true,
         paymentMethod: true,
         paymentStatus: true,
         paymentReference: true,
-        paymentVerifiedAt: true,
-        paymentVerifiedBy: true,
       },
     });
 
+    if (!order) {
+      return NextResponse.json(
+        { error: "Order not found." },
+        { status: 404 },
+      );
+    }
+
+    if (order.paymentMethod !== "UPI") {
+      return NextResponse.json(
+        { error: "Only UPI payments can be verified or rejected here." },
+        { status: 400 },
+      );
+    }
+
+    if (
+      order.paymentStatus !== PaymentStatus.AWAITING_VERIFICATION
+    ) {
+      return NextResponse.json(
+        {
+          error: `This payment cannot be updated because its status is ${order.paymentStatus}.`,
+        },
+        { status: 409 },
+      );
+    }
+
+    if (!order.paymentReference?.trim()) {
+      return NextResponse.json(
+        { error: "The order has no UPI transaction reference." },
+        { status: 400 },
+      );
+    }
+
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      // Only one request can successfully process this payment.
+      const result = await tx.order.updateMany({
+        where: {
+          id: order.id,
+          paymentMethod: "UPI",
+          paymentStatus: PaymentStatus.AWAITING_VERIFICATION,
+          paymentReference: { not: null },
+        },
+        data:
+          action === "mark_paid"
+            ? {
+                paymentStatus: PaymentStatus.PAID,
+                paymentVerifiedAt: new Date(),
+                paymentVerifiedBy: "store-owner",
+              }
+            : {
+                paymentStatus: PaymentStatus.REJECTED,
+                paymentVerifiedAt: null,
+                paymentVerifiedBy: null,
+              },
+      });
+
+      if (result.count !== 1) {
+        throw new Error("PAYMENT_STATE_CHANGED");
+      }
+
+      return tx.order.findUnique({
+        where: { id: order.id },
+        select: {
+          id: true,
+          paymentStatus: true,
+          paymentVerifiedAt: true,
+        },
+      });
+    });
+
     return NextResponse.json({
+      success: true,
       message:
         action === "mark_paid"
           ? "Payment marked as paid."
@@ -150,11 +152,24 @@ export async function POST(
       order: updatedOrder,
     });
   } catch (error) {
-    console.error("Payment verification error:", error);
+    if (
+      error instanceof Error &&
+      error.message === "PAYMENT_STATE_CHANGED"
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "The payment was updated by another request. Refresh the order and try again.",
+        },
+        { status: 409 },
+      );
+    }
+
+    console.error("Admin payment update failed:", error);
 
     return NextResponse.json(
       { error: "Unable to update payment status." },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import ProductActions from "./products/ProductActions";
 import PaymentActions from "./orders/PaymentActions";
 import OrderStatusActions from "./orders/OrderStatusActions";
+import { isStoreOwner } from "@/lib/admin-auth";
 
 const businesses = [
   { value: "ALL", label: "All businesses" },
@@ -24,13 +25,28 @@ function LoadingAdmin() {
 async function AdminContent() {
   const { userId } = await auth();
 
-  if (!userId) redirect("/sign-in");
+  if (!userId) {
+    redirect("/sign-in");
+  }
+
+  const authorized = await isStoreOwner();
+
+  if (!authorized) {
+    return (
+      <main className="admin-access-denied">
+        <h1>Access denied</h1>
+        <p>This account cannot access the owner dashboard.</p>
+      </main>
+    );
+  }
 
   const user = await currentUser();
 
   const email = user?.emailAddresses.find(
     (item) => item.id === user.primaryEmailAddressId,
   )?.emailAddress;
+
+  // Keep the existing products/orders queries and dashboard below this point.
 
   const ownerEmail = process.env.ADMIN_EMAIL;
 

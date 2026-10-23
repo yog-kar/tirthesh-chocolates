@@ -1,4 +1,3 @@
-
 import { auth, currentUser } from "@clerk/nextjs/server";
 
 export async function isStoreOwner(): Promise<boolean> {
@@ -9,15 +8,24 @@ export async function isStoreOwner(): Promise<boolean> {
   }
 
   const user = await currentUser();
+
   const primaryEmail = user?.emailAddresses.find(
     (item) => item.id === user.primaryEmailAddressId,
   )?.emailAddress;
 
-  const ownerEmail = process.env.ADMIN_EMAIL;
+  if (!primaryEmail) {
+    return false;
+  }
 
-  return Boolean(
-    primaryEmail &&
-      ownerEmail &&
-      primaryEmail.toLowerCase() === ownerEmail.trim().toLowerCase(),
-  );
+  // Prefer ADMIN_EMAILS when configured; preserve compatibility
+  // with the existing single ADMIN_EMAIL setting otherwise.
+  const configuredEmails = process.env.ADMIN_EMAILS?.trim()
+    ? process.env.ADMIN_EMAILS.split(",")
+    : [process.env.ADMIN_EMAIL ?? ""];
+
+  const allowedEmails = configuredEmails
+    .map((email) => email.trim().toLowerCase())
+    .filter(Boolean);
+
+  return allowedEmails.includes(primaryEmail.trim().toLowerCase());
 }
